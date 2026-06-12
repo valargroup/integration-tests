@@ -9,7 +9,7 @@
 #
 
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal, zebrad_binary
+from test_framework.util import assert_equal, zcashd_binary, zcashd_compat_enabled, zebrad_binary
 
 from difflib import SequenceMatcher, unified_diff
 import subprocess
@@ -615,7 +615,8 @@ class ShowHelpTest(BitcoinTestFramework):
 
     def show_help(self, expected, extra_args):
         with tempfile.SpooledTemporaryFile(max_size=2**16) as log_stdout:
-            args = [ zebrad_binary(), "--help" ] + extra_args
+            binary = zcashd_binary() if zcashd_compat_enabled() else zebrad_binary()
+            args = [ binary, "--help" ] + extra_args
             process = subprocess.run(args, stdout=log_stdout)
             assert_equal(process.returncode, 0)
             log_stdout.seek(0)

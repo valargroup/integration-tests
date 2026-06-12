@@ -9,7 +9,7 @@
 from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal, \
-    start_nodes, start_node, bitcoind_processes
+    start_nodes, start_node, bitcoind_processes, zcashd_compat_enabled
 
 def check_array_result(object_array, to_match, expected):
     """
@@ -76,6 +76,10 @@ class KeyPoolTest(BitcoinTestFramework):
         nodes[0].walletpassphrase('test', 12000)
         nodes[0].keypoolrefill(3)
         nodes[0].walletlock()
+
+        if zcashd_compat_enabled():
+            print("Skipping zcashd mining keypool drain under zcashd-compat; generate is routed to zebrad")
+            return
 
         # drain them by mining
         nodes[0].generate(1)

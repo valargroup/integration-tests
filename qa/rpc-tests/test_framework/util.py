@@ -547,6 +547,71 @@ def initialize_chain(test_dir, num_nodes, cachedir, cache_behavior='current'):
                 # overwrite port/rpcport and clock offset in zcash.conf
                 initialize_datadir(test_dir, i, clock_offset=offset)
 
+    def rebuild_compat_cache(compat_cachedir):
+        from .zcashd_compat import MINER_KEYS
+
+        for i in range(MAX_NODES):
+            node_i_dir = node_dir(compat_cachedir, i)
+            if os.path.isdir(node_i_dir):
+                shutil.rmtree(node_i_dir)
+
+        block_time = int(time.time()) - (200 * PRE_BLOSSOM_BLOCK_TARGET_SPACING)
+        for i in range(MAX_NODES):
+            datadir = initialize_datadir(compat_cachedir, i)
+            config = update_zebrad_conf(datadir, rpc_port(i), p2p_port(i), indexer_rpc_port(i), ZebraArgs(
+                miner_address=MINER_KEYS[i][1],
+            ))
+            args = [zebrad_binary(), "-c="+config, "start"]
+            bitcoind_processes[i] = subprocess.Popen(args)
+            if os.getenv("PYTHON_DEBUG", ""):
+                print("initialize_chain: zcashd-compat %s started, waiting for RPC to come up" % (zebrad_binary(),))
+            wait_for_zebrad_start(bitcoind_processes[i], rpc_url(i), i)
+
+        rpcs = [get_rpc_proxy(rpc_url(i), i) for i in range(MAX_NODES)]
+
+        # Match the default cache shape: 200 blocks, with the first 4 nodes
+        # each receiving mature and immature coinbase outputs.
+        for _ in range(2):
+            for peer in range(4):
+                for i in range(MAX_NODES):
+                    if i != peer:
+                        connect_nodes_bi(rpcs, i, peer)
+                for _ in range(25):
+                    rpcs[peer].generate(1)
+                    block_time += PRE_BLOSSOM_BLOCK_TARGET_SPACING
+                sync_blocks(rpcs)
+
+                stop_nodes(rpcs)
+                wait_bitcoinds()
+                rpcs = []
+                for i in range(MAX_NODES):
+                    config = zebrad_config(node_dir(compat_cachedir, i))
+                    args = [zebrad_binary(), "-c="+config, "start"]
+                    bitcoind_processes[i] = subprocess.Popen(args)
+                    wait_for_zebrad_start(bitcoind_processes[i], rpc_url(i), i)
+                    rpcs.append(get_rpc_proxy(rpc_url(i), i))
+
+        assert_greater_than(time.time() + 1, block_time)
+
+        stop_nodes(rpcs)
+        wait_bitcoinds()
+        for i in range(MAX_NODES):
+            with open(node_file(compat_cachedir, i, 'cache_config.json'), "w", encoding="utf8") as cache_conf_file:
+                cache_config = { "cache_time": time.time(), "zcashd_compat": True }
+                cache_conf_file.write(json.dumps(cache_config, indent=4))
+
+    def init_from_compat_cache(compat_cachedir):
+        for i in range(num_nodes):
+            from_dir = node_dir(compat_cachedir, i)
+            to_dir = node_dir(test_dir, i)
+            shutil.copytree(from_dir, to_dir)
+
+            with open(node_file(test_dir, i, 'cache_config.json'), "r", encoding="utf8") as cache_conf_file:
+                cache_conf = json.load(cache_conf_file)
+                offset = round(cache_conf['cache_time']) - round(time.time())
+                initialize_datadir(test_dir, i, clock_offset=offset)
+                open(os.path.join(node_dir(test_dir, i), "zcash.conf"), "a", encoding="utf8").close()
+
     def init_persistent(cache_behavior):
         assert num_nodes <= 4 # only 4 nodes with Sprout funds are supported
         cache_path = persistent_cache_path(cache_behavior)
@@ -584,17 +649,23 @@ def initialize_chain(test_dir, num_nodes, cachedir, cache_behavior='current'):
                 # overwrite port/rpcport and clock offset in zcash.conf
                 initialize_datadir(test_dir, i, clock_offset=offset)
 
-    def cache_rebuild_required():
+    def cache_rebuild_required(cache_base=cachedir):
         for i in range(MAX_NODES):
-            node_path = node_dir(cachedir, i)
+            node_path = node_dir(cache_base, i)
             if os.path.isdir(node_path):
-                if not os.path.isfile(node_file(cachedir, i, 'cache_config.json')):
+                if not os.path.isfile(node_file(cache_base, i, 'cache_config.json')):
                     return True
             else:
                 return True
         return False
 
-    if cache_behavior == 'current':
+    if zcashd_compat_enabled() and cache_behavior in ('current', 'fresh'):
+        compat_cachedir = os.path.join(cachedir, "zcashd-compat")
+        os.makedirs(compat_cachedir, exist_ok=True)
+        if cache_behavior == 'fresh' or cache_rebuild_required(compat_cachedir):
+            rebuild_compat_cache(compat_cachedir)
+        init_from_compat_cache(compat_cachedir)
+    elif cache_behavior == 'current':
         if cache_rebuild_required(): rebuild_cache()
         init_from_cache()
     elif cache_behavior == 'fresh':
@@ -612,6 +683,8 @@ def initialize_chain_clean(test_dir, num_nodes):
     """
     for i in range(num_nodes):
         initialize_datadir(test_dir, i)
+        if zcashd_compat_enabled():
+            open(os.path.join(node_dir(test_dir, i), "zcash.conf"), "a", encoding="utf8").close()
 
 def persistent_cache_path(cache_behavior):
     return os.path.join(

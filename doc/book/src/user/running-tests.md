@@ -78,7 +78,7 @@ Run all regression tests:
 ./qa/pull-tester/rpc-tests.py
 ```
 
-Run the opt-in zcashd compatibility smoke profile:
+Run the opt-in zcashd compatibility profile:
 
 ```bash
 ZCASHD=/path/to/zcashd ZEBRAD=/path/to/zebrad ./qa/pull-tester/rpc-tests.py --zcashd-compat
@@ -89,6 +89,11 @@ Mining and P2P topology operations are routed to zebrad; zcashd provides the
 wallet and zcashd RPC surface. It is intended as a completeness benchmark for
 tests that require zcashd RPCs, not for P2P/mininode or zcashd mining-internals
 tests.
+
+The profile uses a separate pregenerated chain cache. It caches only zebrad
+datadirs; zcashd starts clean, imports the static regtest miner key, and rescans
+cached blocks. Tests that depend on zcashd owning P2P connections, mining blocks
+itself, or exercising chain-control reorg internals remain out of scope.
 
 ## Parallel execution
 

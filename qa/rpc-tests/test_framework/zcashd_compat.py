@@ -34,6 +34,29 @@ from .util import (
 )
 
 
+_BRANCH_ID_TO_NU_NAME = {
+    "5ba81b19": "Overwinter",
+    "76b809bb": "Sapling",
+    "2bb40e60": "Blossom",
+    "f5b9230b": "Heartwood",
+    "e9ff75a6": "Canopy",
+    "c2d6d0b4": "NU5",
+    "c8e71055": "NU6",
+    "4dec4df0": "NU6.1",
+    "5437f330": "NU6.2",
+}
+
+_BASE_ZCASH_CONF_KEYS = {
+    "regtest",
+    "showmetrics",
+    "rpcuser",
+    "rpcpassword",
+    "rpcport",
+    "port",
+    "listen",
+    "listenonion",
+}
+
 MINER_KEYS = [
     ("cUeKHd5orzT3mz8P9pxyREHfsWtVfgsfDjiZZBcjUBAaGk1BTj7N", "tmJXomn8fhYy3AFqDEteifjHRMUdKtBuTGM"),
     ("cQMdgyv6y8pAftMKnrZDMMeJGZdfVUhMBrw3L71rctnAuP65S2HW", "tmUtDnWmxBwnNfD9P8WunnfS1aBHDUmtXeq"),
@@ -66,6 +89,57 @@ def zcashd_dir(dirname, i):
     return os.path.join(dirname, "zcashd" + str(i))
 
 
+def _reap_existing_process(processes, i):
+    if i not in processes:
+        return
+    process = processes[i]
+    try:
+        process.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+    del processes[i]
+
+
+def _split_compat_args(extra_args):
+    if extra_args is None:
+        return ZebraArgs(), []
+    if isinstance(extra_args, ZebraArgs):
+        return ZebraArgs() + extra_args, []
+    if not isinstance(extra_args, (list, tuple)):
+        raise ValueError("zcashd-compat profile expects ZebraArgs or zcashd argument list")
+
+    zebra_args = ZebraArgs()
+    zcashd_args = []
+    for arg in extra_args:
+        if not isinstance(arg, str):
+            raise ValueError("zcashd-compat zcashd arguments must be strings")
+        if arg.startswith("-nuparams="):
+            branch_id, height = arg.split("=", 1)[1].split(":", 1)
+            nu_name = _BRANCH_ID_TO_NU_NAME.get(branch_id.lower())
+            if nu_name is None:
+                raise ValueError("unknown zcashd-compat nuparams branch id " + branch_id)
+            zebra_args.activation_heights[nu_name] = int(height)
+        else:
+            zcashd_args.append(arg)
+    return zebra_args, zcashd_args
+
+
+def _copy_legacy_zcash_conf(dirname, i, f):
+    legacy_conf = os.path.join(node_dir(dirname, i), "zcash.conf")
+    if not os.path.exists(legacy_conf):
+        return
+
+    with open(legacy_conf, "r", encoding="utf8") as legacy_file:
+        for line in legacy_file:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key = stripped.split("=", 1)[0]
+            if key not in _BASE_ZCASH_CONF_KEYS:
+                f.write(line)
+
+
 def initialize_zcashd_datadir(dirname, i, activation_heights):
     datadir = zcashd_dir(dirname, i)
     os.makedirs(datadir, exist_ok=True)
@@ -78,6 +152,7 @@ def initialize_zcashd_datadir(dirname, i, activation_heights):
         f.write("port=%d\n" % (p2p_port(i) + 1000))
         f.write("listen=0\n")
         f.write("listenonion=0\n")
+        _copy_legacy_zcash_conf(dirname, i, f)
     return datadir
 
 
@@ -102,6 +177,7 @@ def wait_for_zcashd_start(process, url, i):
 
 
 def start_zebrad(i, dirname, zebra_args, rpchost=None, timewait=None, stderr=None):
+    _reap_existing_process(bitcoind_processes, i)
     datadir = node_dir(dirname, i)
     config = update_zebrad_conf(datadir, rpc_port(i), p2p_port(i), indexer_rpc_port(i), zebra_args)
     args = [zebrad_binary(), "-c=" + config, "start"]
@@ -119,7 +195,8 @@ def start_zebrad(i, dirname, zebra_args, rpchost=None, timewait=None, stderr=Non
     return proxy
 
 
-def start_zcashd(i, dirname, zebra_rpc_url, activation_heights, rpchost=None, timewait=None, stderr=None):
+def start_zcashd(i, dirname, zebra_rpc_url, activation_heights, zcashd_args=None, rpchost=None, timewait=None, stderr=None):
+    _reap_existing_process(zcashd_processes, i)
     datadir = initialize_zcashd_datadir(dirname, i, activation_heights)
     args = [
         zcashd_binary(),
@@ -137,6 +214,7 @@ def start_zcashd(i, dirname, zebra_rpc_url, activation_heights, rpchost=None, ti
         "-zebra-compat-poll-interval=1",
     ]
     args.extend(zcashd_nuparams_args(activation_heights))
+    args.extend(zcashd_args or [])
 
     zcashd_processes[i] = subprocess.Popen(args, stderr=stderr)
     if os.getenv("PYTHON_DEBUG", ""):
@@ -146,7 +224,6 @@ def start_zcashd(i, dirname, zebra_rpc_url, activation_heights, rpchost=None, ti
     if os.getenv("PYTHON_DEBUG", ""):
         print("start_zcashd: RPC successfully started for node {} with pid {}".format(i, zcashd_processes[i].pid))
     proxy = get_rpc_auth_proxy(url, i, timeout=timewait)
-    proxy.importprivkey(MINER_KEYS[i][0], "", False)
     if COVERAGE_DIR:
         coverage.write_all_rpc_commands(COVERAGE_DIR, proxy)
     return proxy
@@ -164,6 +241,20 @@ def wait_for_compat_tip(node, timeout=60):
         )
 
     wait_until(fully_ready, timeout=timeout)
+
+
+def import_miner_key(node, i, rescan):
+    try:
+        node.zcashd.importprivkey(MINER_KEYS[i][0], "", rescan)
+    except JSONRPCException as e:
+        message = e.error.get("message", "")
+        if (
+            "already" in message.lower() or
+            "walletpassphrase" in message.lower() or
+            "wallet is locked" in message.lower()
+        ):
+            return
+        raise
 
 
 class CompatNode:
@@ -191,13 +282,11 @@ class CompatNode:
 
 
 def start_compat_pair(i, dirname, extra_args=None, rpchost=None, timewait=None, stderr=None):
-    if extra_args is not None and not isinstance(extra_args, ZebraArgs):
-        raise ValueError("zcashd-compat profile expects ZebraArgs extra_args")
-
-    zebra_args = (ZebraArgs() + extra_args) if extra_args is not None else ZebraArgs()
+    zebra_args, zcashd_args = _split_compat_args(extra_args)
     zebra_args.miner_address = MINER_KEYS[i][1]
     zebra = start_zebrad(i, dirname, zebra_args, rpchost, timewait, stderr)
-    zcashd = start_zcashd(i, dirname, rpc_url(i, rpchost), zebra_args.activation_heights, rpchost, timewait, stderr)
+    zcashd = start_zcashd(i, dirname, rpc_url(i, rpchost), zebra_args.activation_heights, zcashd_args, rpchost, timewait, stderr)
     node = CompatNode(zebra, zcashd)
     wait_for_compat_tip(node)
+    import_miner_key(node, i, zebra.getblockcount() > 0)
     return node
