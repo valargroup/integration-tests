@@ -395,6 +395,59 @@ jobs:
           requesting-repository: ${{ steps.repo-ids.outputs.requesting-repository }}
           job-name: "Build zebrad on ${{ matrix.platform }}${{ matrix.required_suffix }}"
 
+  get-zcashd:
+    name: Get zcashd compat runtime
+    needs: build-zebra
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Select the test branch
+        id: test-branch
+        if: endsWith(github.event.action, '-interop-request')
+        env:
+          TEST_SHA: ${{ github.event.client_payload.test_sha }}
+        run: |
+          if [ "${TEST_SHA}" != "null" ] && [ -n "${TEST_SHA}" ]; then
+            echo "test_sha=${TEST_SHA}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check out the selected test branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Empty on direct repo PRs, which selects the default.
+          ref: ${{ steps.test-branch.outputs.test_sha }}
+          persist-credentials: false
+
+      - name: Download pinned zcashd compat runtime
+        shell: bash
+        env:
+          TARGET_TRIPLE: x86_64-pc-linux-gnu
+          PIN_FILE: qa/zcashd-compat/release.json
+        run: |
+          set -euo pipefail
+
+          archive_url=$(jq -er '.artifacts[] | select(.target_triple == env.TARGET_TRIPLE) | .runtime_archive_url' "$PIN_FILE")
+          archive_sha256=$(jq -er '.artifacts[] | select(.target_triple == env.TARGET_TRIPLE) | .runtime_archive_sha256' "$PIN_FILE")
+          member=$(jq -er '.artifacts[] | select(.target_triple == env.TARGET_TRIPLE) | .runtime_archive_member_binary_path' "$PIN_FILE")
+
+          case "$member" in
+            ./*) ;;
+            *) echo "Pinned archive member must be a relative ./ path: $member" >&2; exit 1 ;;
+          esac
+
+          mkdir -p ./src ./zcashd-extract
+          curl -L --fail "$archive_url" -o ./zcashd-runtime.tar.gz
+          printf '%s  %s\n' "$archive_sha256" ./zcashd-runtime.tar.gz | sha256sum -c -
+          tar -xzf ./zcashd-runtime.tar.gz -C ./zcashd-extract "$member"
+          cp "./zcashd-extract/${member#./}" ./src/zcashd
+          chmod +x ./src/zcashd
+
+      - name: Upload zcashd compat runtime
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zcashd-ubuntu-22.04
+          path: ./src/zcashd
+
   build-zaino:
     name: Build zainod on ${{ matrix.platform }}${{ matrix.required_suffix }}
     needs: setup
@@ -890,3 +943,100 @@ jobs:
           requesting-owner: ${{ steps.repo-ids.outputs.requesting-owner }}
           requesting-repository: ${{ steps.repo-ids.outputs.requesting-repository }}
           job-name: "RPC tests ${{ matrix.platform }} ${{ matrix.shard }}${{ matrix.required_suffix }}"
+
+  test-rpc-zcashd-compat:
+    name: RPC zcashd compat tests Ubuntu 22.04
+    needs:
+      - setup
+      - build-zebra
+      - get-zcashd
+      - rpc-depends
+    runs-on: ubuntu-22.04
+    if: ${{ !endsWith(github.event.action, '-interop-request') }}
+    continue-on-error: true
+
+    steps:
+      - name: Check out the selected test branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Cache Python dependencies for RPC tests
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          enableCrossOsArchive: true
+          path: venv
+          key: test-rpc-venv-ubuntu-22.04
+
+      - name: Get Python dependencies for RPC tests if not cached
+        run: |
+          python3 -m venv ./venv
+          . ./venv/bin/activate
+          pip install zmq asyncio base58 toml embit
+
+      - name: Download zebrad artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: zebrad-ubuntu-22.04
+          path: ./src
+
+      - name: Download zcashd compat runtime
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: zcashd-ubuntu-22.04
+          path: ./src
+
+      - name: Make artifacts executable
+        run: |
+          chmod +x ./src/zebrad
+          chmod +x ./src/zcashd
+
+      - name: Get Sprout parameters
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: zcash-params
+          key: zcash-params
+          restore-keys: |
+            zcash-params
+
+      - name: Download Sprout parameters
+        # In case the cache of Sprout parameters step fails
+        shell: bash
+        run: |
+          mkdir zcash-params || echo ""
+          curl -L -C - https://download.z.cash/downloads/sprout-groth16.params -o zcash-params/sprout-groth16.params
+
+      - name: Setup zcash-params
+        shell: bash
+        run: mv zcash-params "$HOME/.zcash-params"
+
+      - name: RPC zcashd compat tests
+        run: |
+          cat <<EOF > ./subclass.py
+          import importlib
+          import os
+          import subprocess
+          import sys
+
+          sys.path.append('qa/pull-tester')
+          rpc_tests = importlib.import_module('rpc-tests')
+
+          src_dir = os.environ["SRC_DIR"]
+          build_dir = '.'
+          exeext = ''
+
+          class MyTestHandler(rpc_tests.RPCTestHandler):
+              def start_test(self, args, stdout, stderr):
+                  return subprocess.Popen(
+                      args,
+                      universal_newlines=True,
+                      stdout=stdout,
+                      stderr=stderr)
+
+          test_list = rpc_tests.ZCASHD_COMPAT_SCRIPTS
+          all_passed = rpc_tests.run_tests(MyTestHandler, test_list, src_dir, build_dir, exeext, jobs=1)
+          if all_passed == False:
+              sys.exit(1)
+          EOF
+          . ./venv/bin/activate
+          ZEBRAD=$(pwd)/src/zebrad ZCASHD=$(pwd)/src/zcashd ZCASHD_COMPAT=1 SRC_DIR=$(pwd) python3 ./subclass.py
