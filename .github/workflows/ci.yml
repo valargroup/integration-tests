@@ -399,7 +399,7 @@ jobs:
   get-zcashd:
     name: Get zcashd compat runtime
     needs: build-zebra
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Select the test branch
@@ -446,7 +446,7 @@ jobs:
       - name: Upload zcashd compat runtime
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: zcashd-ubuntu-22.04
+          name: zcashd-ubuntu-24.04
           path: ./src/zcashd
 
   build-zaino:
@@ -946,13 +946,12 @@ jobs:
           job-name: "RPC tests ${{ matrix.platform }} ${{ matrix.shard }}${{ matrix.required_suffix }}"
 
   test-rpc-zcashd-compat:
-    name: RPC zcashd compat tests Ubuntu 22.04
+    name: RPC zcashd compat tests Ubuntu 24.04
     needs:
       - setup
       - build-zebra
       - get-zcashd
-      - rpc-depends
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: ${{ !endsWith(github.event.action, '-interop-request') }}
     continue-on-error: true
 
@@ -967,7 +966,7 @@ jobs:
         with:
           enableCrossOsArchive: true
           path: venv
-          key: test-rpc-venv-ubuntu-22.04
+          key: test-rpc-venv-ubuntu-24.04
 
       - name: Get Python dependencies for RPC tests if not cached
         run: |
@@ -978,13 +977,13 @@ jobs:
       - name: Download zebrad artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: zebrad-ubuntu-22.04
+          name: zebrad-ubuntu-24.04
           path: ./src
 
       - name: Download zcashd compat runtime
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: zcashd-ubuntu-22.04
+          name: zcashd-ubuntu-24.04
           path: ./src
 
       - name: Make artifacts executable
