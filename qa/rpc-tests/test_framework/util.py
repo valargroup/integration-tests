@@ -70,6 +70,9 @@ def zaino_binary():
 def zallet_binary():
     return os.getenv("ZALLET", os.path.join("src", "zallet"))
 
+def zcashd_binary():
+    return os.getenv("ZCASHD", os.path.join("src", "zcashd"))
+
 def zebrad_config(datadir):
     base_location = os.path.join('qa', 'defaults', 'zebrad', 'config.toml')
     new_location = os.path.join(datadir, "config.toml")
@@ -145,6 +148,9 @@ def zaino_rpc_port(n):
 
 def zaino_grpc_port(n):
     return PORT_MIN + (PORT_RANGE * 5) + n + (MAX_NODES * PortSeed.n) % (PORT_RANGE - 1 - MAX_NODES)
+
+def zcashd_rpc_port(n):
+    return PORT_MIN + (PORT_RANGE * 6) + n + (MAX_NODES * PortSeed.n) % (PORT_RANGE - 1 - MAX_NODES)
 
 def check_json_precision():
     """Make sure json library being used does not lose precision converting ZEC values"""
@@ -240,6 +246,28 @@ def sync_mempools(nodes, wallets=None, wait=0.5, timeout=60):
     raise AssertionError("Mempool sync failed")
 
 bitcoind_processes = {}
+zcashd_processes = {}
+
+ZCASHD_COMPAT_RPC_USERNAME = "user"
+ZCASHD_COMPAT_RPC_PASSWORD = "pass"
+
+def zcashd_compat_enabled():
+    return os.getenv("ZCASHD_COMPAT", "").lower() in ("1", "true", "yes")
+
+def zcashd_rpc_url(i, rpchost=None):
+    host = '127.0.0.1'
+    port = zcashd_rpc_port(i)
+    if rpchost:
+        parts = rpchost.split(':')
+        if len(parts) == 2:
+            host, port = parts
+        else:
+            host = rpchost
+    return "http://%s:%s@%s:%d" % (
+        ZCASHD_COMPAT_RPC_USERNAME,
+        ZCASHD_COMPAT_RPC_PASSWORD,
+        host,
+        int(port))
 
 def initialize_datadir(dirname, n, clock_offset=0):
     datadir = node_dir(dirname, n)
@@ -670,6 +698,12 @@ def start_node(i, dirname, extra_args=None, rpchost=None, timewait=None, binary=
     """
     Start a bitcoind and return RPC connection to it
     """
+    if zcashd_compat_enabled():
+        if binary is not None:
+            raise ValueError("zcashd-compat profile does not support custom node binaries")
+        from .zcashd_compat import start_compat_pair
+        return start_compat_pair(i, dirname, extra_args, rpchost, timewait, stderr)
+
     datadir = node_dir(dirname, i)
     if binary is None:
         binary = zebrad_binary()
@@ -742,8 +776,16 @@ def stop_node(node, i):
         node.stop()
     except http.client.CannotSendRequest as e:
         print("WARN: Unable to stop node: " + repr(e))
-    bitcoind_processes[i].wait()
-    del bitcoind_processes[i]
+    except BrokenPipeError as e:
+        print("WARN: Node already stopped: " + repr(e))
+    except ConnectionRefusedError as e:
+        print("WARN: Node already stopped: " + repr(e))
+    if i in zcashd_processes:
+        wait_or_kill(zcashd_processes[i])
+        del zcashd_processes[i]
+    if i in bitcoind_processes:
+        wait_or_kill(bitcoind_processes[i])
+        del bitcoind_processes[i]
 
 def stop_nodes(nodes):
     for node in nodes:
@@ -779,6 +821,12 @@ def wait_bitcoinds():
     for bitcoind in list(bitcoind_processes.values()):
         wait_or_kill(bitcoind)
     bitcoind_processes.clear()
+
+def wait_zcashds():
+    # Wait for all zcashd compat wrappers to cleanly exit.
+    for zcashd in list(zcashd_processes.values()):
+        wait_or_kill(zcashd)
+    zcashd_processes.clear()
 
 def connect_nodes(from_connection, node_num):
     ip_port = "127.0.0.1:"+str(p2p_port(node_num))
@@ -1294,10 +1342,10 @@ def wait_zainods():
 
 def stop_all_processes():
     '''
-    Forcibly terminate every zebrad, zainod and zallet process we spawned,
+    Forcibly terminate every zebrad, zcashd, zainod and zallet process we spawned,
     regardless of whether a test data structure still references it.
     '''
-    for processes in (bitcoind_processes, zallet_processes, zainod_processes):
+    for processes in (zcashd_processes, bitcoind_processes, zallet_processes, zainod_processes):
         for p in list(processes.values()):
             try:
                 p.terminate() # send SIGHIGH

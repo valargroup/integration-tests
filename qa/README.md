@@ -27,12 +27,15 @@ Setup
 
 By default, binaries must exist in the `../src ` folder. All tests require the `zebrad`
 binary; most tests require the `zallet` binary; some tests require the `zainod` binary.
+The opt-in zcashd compatibility profile also requires a zebra-compat-enabled `zcashd`
+binary.
 
 Alternatively, you can set the binary paths with:
 ```
 export ZEBRAD=/path/to/zebrad
 export ZAINOD=/path/to/zainod
 export ZALLET=/path/to/zallet
+export ZCASHD=/path/to/zcashd
 ```
 
 Running tests locally
@@ -49,6 +52,16 @@ Or you can run any combination of tests by calling
 Run the regression test suite with
 
     ./qa/pull-tester/rpc-tests.py
+
+Run the opt-in zcashd compatibility smoke profile with
+
+    ZCASHD=/path/to/zcashd ZEBRAD=/path/to/zebrad ./qa/pull-tester/rpc-tests.py --zcashd-compat
+
+This profile starts paired regtest stacks of zebrad plus `zcashd -zebra-compat`.
+Mining and P2P topology operations are routed to zebrad; zcashd provides the
+wallet and zcashd RPC surface. It is intended as a completeness benchmark for
+tests that require zcashd RPCs, not for P2P/mininode or zcashd mining-internals
+tests.
 
 By default, tests will be run in parallel. To specify how many jobs to run,
 append `--jobs=n` (default n=4).
@@ -94,6 +107,7 @@ to recover with:
 ```bash
 rm -rf cache
 killall zebrad
+killall zcashd
 killall zainod
 killall zallet
 ```
