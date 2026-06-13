@@ -294,6 +294,8 @@ ZCASHD_COMPAT_SCRIPTS = [
     'zcashd_compat_smoke.py',
     'zcashd_compat_identity.py',
     'zcashd_compat_reorg.py',
+    'zcashd_compat_reorg_wallet.py',
+    'zcashd_compat_persistence.py',
     'zcashd_compat_wallet.py',
     'zcashd_compat_wallet_import.py',
     'multi_rpc.py',
