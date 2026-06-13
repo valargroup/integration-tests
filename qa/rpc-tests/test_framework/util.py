@@ -70,6 +70,9 @@ def zaino_binary():
 def zallet_binary():
     return os.getenv("ZALLET", os.path.join("src", "zallet"))
 
+def zcashd_binary():
+    return os.getenv("ZCASHD", os.path.join("src", "zcashd"))
+
 def zebrad_config(datadir):
     base_location = os.path.join('qa', 'defaults', 'zebrad', 'config.toml')
     new_location = os.path.join(datadir, "config.toml")
@@ -146,6 +149,9 @@ def zaino_rpc_port(n):
 def zaino_grpc_port(n):
     return PORT_MIN + (PORT_RANGE * 5) + n + (MAX_NODES * PortSeed.n) % (PORT_RANGE - 1 - MAX_NODES)
 
+def zcashd_rpc_port(n):
+    return PORT_MIN + (PORT_RANGE * 6) + n + (MAX_NODES * PortSeed.n) % (PORT_RANGE - 1 - MAX_NODES)
+
 def check_json_precision():
     """Make sure json library being used does not lose precision converting ZEC values"""
     n = Decimal("20000000.00000003")
@@ -162,25 +168,54 @@ def hex_str_to_bytes(hex_str):
 def str_to_b64str(string):
     return b64encode(string.encode('utf-8')).decode('ascii')
 
-def sync_blocks(nodes, wallets=None, wait=0.125, timeout=60, allow_different_tips=False):
+def sync_blocks(nodes, wallets=None, wait=0.125, timeout=60, allow_different_tips=False,
+                wait_for_compat_wallet=True):
     """
     Wait until everybody has the same tip, and has notified
     all internal listeners of them.
 
     If allow_different_tips is True, waits until everyone has
     the same block count.
+
+    Under the zcashd-compat profile `nodes` are normally CompatNode proxies and
+    this also waits for the zcashd wallet to catch up. Pass
+    wait_for_compat_wallet=False when `nodes` are plain zebrad proxies (e.g. the
+    chain-cache builder, which runs zebrad without a paired zcashd).
     """
+    synced = False
     while timeout > 0:
         if allow_different_tips:
             tips = [ x.getblockcount() for x in nodes ]
         else:
             tips = [ x.getbestblockhash() for x in nodes ]
         if tips == [ tips[0] ]*len(tips):
-            if not wallets:
-                return True
+            synced = True
             break
         time.sleep(wait)
         timeout -= wait
+
+    if not synced:
+        print('Node tips:', tips)
+        raise AssertionError("Block sync failed: node tips did not converge")
+
+    if not wallets:
+        if not (zcashd_compat_enabled() and wait_for_compat_wallet):
+            return True
+        # The zcashd wallet processes connected blocks asynchronously, so an
+        # in-sync chain tip does not yet guarantee that mined outputs are
+        # spendable. `validation_notifications_caught_up` is the zcashd analog
+        # of zallet's `wallet_tip == node_tip`: it is true once every connected
+        # block has dispatched its wallet notifications. Use a dedicated budget
+        # rather than whatever is left over from tip convergence above.
+        notify_timeout = 60
+        while notify_timeout > 0:
+            if all(n.getzebracompatinfo()["local"]["validation_notifications_caught_up"]
+                   for n in nodes):
+                return True
+            time.sleep(wait)
+            notify_timeout -= wait
+        print('Node tips:', tips)
+        raise AssertionError("Block sync failed: zcashd-compat wallet notifications did not catch up")
 
     if wallets:
         # Now that the block counts are in sync, wait for the internal
@@ -209,6 +244,7 @@ def sync_mempools(nodes, wallets=None, wait=0.5, timeout=60):
 
     Returns `True` when all wallets are in synced, or if no wallet is given.
     """
+    matched = False
     while timeout > 0:
         pool = set(nodes[0].getrawmempool())
         num_match = 1
@@ -216,11 +252,17 @@ def sync_mempools(nodes, wallets=None, wait=0.5, timeout=60):
             if set(nodes[i].getrawmempool()) == pool:
                 num_match = num_match+1
         if num_match == len(nodes):
-            if not wallets:
-                return True
+            matched = True
             break
         time.sleep(wait)
         timeout -= wait
+
+    if not matched:
+        print('Node mempools:', [ sorted(n.getrawmempool()) for n in nodes ])
+        raise AssertionError("Mempool sync failed: mempools did not converge")
+
+    if not wallets:
+        return True
 
     if wallets:
         # Now that the mempools are in sync, wait for the internal
@@ -240,6 +282,28 @@ def sync_mempools(nodes, wallets=None, wait=0.5, timeout=60):
     raise AssertionError("Mempool sync failed")
 
 bitcoind_processes = {}
+zcashd_processes = {}
+
+ZCASHD_COMPAT_RPC_USERNAME = "user"
+ZCASHD_COMPAT_RPC_PASSWORD = "pass"
+
+def zcashd_compat_enabled():
+    return os.getenv("ZCASHD_COMPAT", "").lower() in ("1", "true", "yes")
+
+def zcashd_rpc_url(i, rpchost=None):
+    host = '127.0.0.1'
+    port = zcashd_rpc_port(i)
+    if rpchost:
+        parts = rpchost.split(':')
+        if len(parts) == 2:
+            host, port = parts
+        else:
+            host = rpchost
+    return "http://%s:%s@%s:%d" % (
+        ZCASHD_COMPAT_RPC_USERNAME,
+        ZCASHD_COMPAT_RPC_PASSWORD,
+        host,
+        int(port))
 
 def initialize_datadir(dirname, n, clock_offset=0):
     datadir = node_dir(dirname, n)
@@ -519,6 +583,83 @@ def initialize_chain(test_dir, num_nodes, cachedir, cache_behavior='current'):
                 # overwrite port/rpcport and clock offset in zcash.conf
                 initialize_datadir(test_dir, i, clock_offset=offset)
 
+    def rebuild_compat_cache(compat_cachedir):
+        """
+        Recreate the zcashd-compat regtest chain cache using plain zebrad
+        nodes. The resulting cache contains synced node datadirs with a
+        200-block chain and no paired zcashd wallet state.
+        """
+        from .zcashd_compat import MINER_KEYS
+
+        for i in range(MAX_NODES):
+            node_i_dir = node_dir(compat_cachedir, i)
+            if os.path.isdir(node_i_dir):
+                shutil.rmtree(node_i_dir)
+
+        block_time = int(time.time()) - (200 * PRE_BLOSSOM_BLOCK_TARGET_SPACING)
+        for i in range(MAX_NODES):
+            datadir = initialize_datadir(compat_cachedir, i)
+            config = update_zebrad_conf(datadir, rpc_port(i), p2p_port(i), indexer_rpc_port(i), ZebraArgs(
+                miner_address=MINER_KEYS[i][1],
+            ))
+            args = [zebrad_binary(), "-c="+config, "start"]
+            bitcoind_processes[i] = subprocess.Popen(args)
+            if os.getenv("PYTHON_DEBUG", ""):
+                print("initialize_chain: zcashd-compat %s started, waiting for RPC to come up" % (zebrad_binary(),))
+            wait_for_zebrad_start(bitcoind_processes[i], rpc_url(i), i)
+
+        rpcs = [get_rpc_proxy(rpc_url(i), i) for i in range(MAX_NODES)]
+
+        # Match the default cache shape: 200 blocks, with the first 4 nodes
+        # each receiving mature and immature coinbase outputs.
+        for _ in range(2):
+            for peer in range(4):
+                for i in range(MAX_NODES):
+                    if i != peer:
+                        connect_nodes_bi(rpcs, i, peer)
+                for _ in range(25):
+                    rpcs[peer].generate(1)
+                    block_time += PRE_BLOSSOM_BLOCK_TARGET_SPACING
+                # These are plain zebrad proxies (no paired zcashd in the cache
+                # builder), so do not wait on the zcashd-compat wallet here.
+                sync_blocks(rpcs, wait_for_compat_wallet=False)
+
+                stop_nodes(rpcs)
+                wait_bitcoinds()
+                rpcs = []
+                for i in range(MAX_NODES):
+                    config = zebrad_config(node_dir(compat_cachedir, i))
+                    args = [zebrad_binary(), "-c="+config, "start"]
+                    bitcoind_processes[i] = subprocess.Popen(args)
+                    wait_for_zebrad_start(bitcoind_processes[i], rpc_url(i), i)
+                    rpcs.append(get_rpc_proxy(rpc_url(i), i))
+
+        assert_greater_than(time.time() + 1, block_time)
+
+        stop_nodes(rpcs)
+        wait_bitcoinds()
+        for i in range(MAX_NODES):
+            with open(node_file(compat_cachedir, i, 'cache_config.json'), "w", encoding="utf8") as cache_conf_file:
+                cache_config = { "cache_time": time.time(), "zcashd_compat": True }
+                cache_conf_file.write(json.dumps(cache_config, indent=4))
+
+    def init_from_compat_cache(compat_cachedir):
+        """
+        Populate `test_dir` from the zcashd-compat chain cache for this test's
+        requested nodes. Rewrites per-node config with a clock offset so cached
+        block times remain valid relative to the current run.
+        """
+        for i in range(num_nodes):
+            from_dir = node_dir(compat_cachedir, i)
+            to_dir = node_dir(test_dir, i)
+            shutil.copytree(from_dir, to_dir)
+
+            with open(node_file(test_dir, i, 'cache_config.json'), "r", encoding="utf8") as cache_conf_file:
+                cache_conf = json.load(cache_conf_file)
+                offset = round(cache_conf['cache_time']) - round(time.time())
+                initialize_datadir(test_dir, i, clock_offset=offset)
+                open(os.path.join(node_dir(test_dir, i), "zcash.conf"), "a", encoding="utf8").close()
+
     def init_persistent(cache_behavior):
         assert num_nodes <= 4 # only 4 nodes with Sprout funds are supported
         cache_path = persistent_cache_path(cache_behavior)
@@ -556,17 +697,23 @@ def initialize_chain(test_dir, num_nodes, cachedir, cache_behavior='current'):
                 # overwrite port/rpcport and clock offset in zcash.conf
                 initialize_datadir(test_dir, i, clock_offset=offset)
 
-    def cache_rebuild_required():
+    def cache_rebuild_required(cache_base=cachedir):
         for i in range(MAX_NODES):
-            node_path = node_dir(cachedir, i)
+            node_path = node_dir(cache_base, i)
             if os.path.isdir(node_path):
-                if not os.path.isfile(node_file(cachedir, i, 'cache_config.json')):
+                if not os.path.isfile(node_file(cache_base, i, 'cache_config.json')):
                     return True
             else:
                 return True
         return False
 
-    if cache_behavior == 'current':
+    if zcashd_compat_enabled() and cache_behavior in ('current', 'fresh'):
+        compat_cachedir = os.path.join(cachedir, "zcashd-compat")
+        os.makedirs(compat_cachedir, exist_ok=True)
+        if cache_behavior == 'fresh' or cache_rebuild_required(compat_cachedir):
+            rebuild_compat_cache(compat_cachedir)
+        init_from_compat_cache(compat_cachedir)
+    elif cache_behavior == 'current':
         if cache_rebuild_required(): rebuild_cache()
         init_from_cache()
     elif cache_behavior == 'fresh':
@@ -584,6 +731,8 @@ def initialize_chain_clean(test_dir, num_nodes):
     """
     for i in range(num_nodes):
         initialize_datadir(test_dir, i)
+        if zcashd_compat_enabled():
+            open(os.path.join(node_dir(test_dir, i), "zcash.conf"), "a", encoding="utf8").close()
 
 def persistent_cache_path(cache_behavior):
     return os.path.join(
@@ -670,6 +819,12 @@ def start_node(i, dirname, extra_args=None, rpchost=None, timewait=None, binary=
     """
     Start a bitcoind and return RPC connection to it
     """
+    if zcashd_compat_enabled():
+        if binary is not None:
+            raise ValueError("zcashd-compat profile does not support custom node binaries")
+        from .zcashd_compat import start_compat_pair
+        return start_compat_pair(i, dirname, extra_args, rpchost, timewait, stderr)
+
     datadir = node_dir(dirname, i)
     if binary is None:
         binary = zebrad_binary()
@@ -742,8 +897,16 @@ def stop_node(node, i):
         node.stop()
     except http.client.CannotSendRequest as e:
         print("WARN: Unable to stop node: " + repr(e))
-    bitcoind_processes[i].wait()
-    del bitcoind_processes[i]
+    except BrokenPipeError as e:
+        print("WARN: Node already stopped: " + repr(e))
+    except ConnectionRefusedError as e:
+        print("WARN: Node already stopped: " + repr(e))
+    if i in zcashd_processes:
+        wait_or_kill(zcashd_processes[i])
+        del zcashd_processes[i]
+    if i in bitcoind_processes:
+        wait_or_kill(bitcoind_processes[i])
+        del bitcoind_processes[i]
 
 def stop_nodes(nodes):
     for node in nodes:
@@ -779,6 +942,12 @@ def wait_bitcoinds():
     for bitcoind in list(bitcoind_processes.values()):
         wait_or_kill(bitcoind)
     bitcoind_processes.clear()
+
+def wait_zcashds():
+    # Wait for all zcashd compat wrappers to cleanly exit.
+    for zcashd in list(zcashd_processes.values()):
+        wait_or_kill(zcashd)
+    zcashd_processes.clear()
 
 def connect_nodes(from_connection, node_num):
     ip_port = "127.0.0.1:"+str(p2p_port(node_num))
@@ -1294,10 +1463,10 @@ def wait_zainods():
 
 def stop_all_processes():
     '''
-    Forcibly terminate every zebrad, zainod and zallet process we spawned,
+    Forcibly terminate every zebrad, zcashd, zainod and zallet process we spawned,
     regardless of whether a test data structure still references it.
     '''
-    for processes in (bitcoind_processes, zallet_processes, zainod_processes):
+    for processes in (zcashd_processes, bitcoind_processes, zallet_processes, zainod_processes):
         for p in list(processes.values()):
             try:
                 p.terminate() # send SIGHIGH

@@ -31,11 +31,13 @@ from .util import (
     stop_wallets,
     stop_zainos,
     wait_bitcoinds,
+    wait_zcashds,
     wait_zainods,
     wait_zallets,
     enable_coverage,
     check_json_precision,
     PortSeed,
+    zcashd_compat_enabled,
 )
 
 
@@ -63,6 +65,8 @@ class BitcoinTestFramework(object):
         initialize_chain(self.options.tmpdir, self.num_nodes, self.options.cachedir, self.cache_behavior)
 
     def prepare_wallets(self):
+        if zcashd_compat_enabled():
+            return
         if self.num_wallets > 0:
             self.miner_addresses = prepare_wallets_for_mining(self.num_wallets, self.options.tmpdir)
 
@@ -84,9 +88,13 @@ class BitcoinTestFramework(object):
                 self.nodes[0].generate(1)
 
     def setup_indexers(self):
+        if zcashd_compat_enabled():
+            return None
         return start_zainos(self.num_indexers, self.options.tmpdir)
 
     def setup_wallets(self):
+        if zcashd_compat_enabled():
+            return None
         return start_wallets(self.num_wallets, self.options.tmpdir)
 
     def setup_network(self, split = False, do_mempool_sync = True):
@@ -126,6 +134,7 @@ class BitcoinTestFramework(object):
         stop_zainos(self.zainos)
         wait_zainods()
         stop_nodes(self.nodes)
+        wait_zcashds()
         wait_bitcoinds()
         self.setup_network(True)
 
@@ -151,6 +160,7 @@ class BitcoinTestFramework(object):
         stop_zainos(self.zainos)
         wait_zainods()
         stop_nodes(self.nodes)
+        wait_zcashds()
         wait_bitcoinds()
         self.setup_network(False, False)
 
@@ -173,8 +183,13 @@ class BitcoinTestFramework(object):
                           help="The seed to use for assigning port numbers (default: current process id)")
         parser.add_option("--coveragedir", dest="coveragedir",
                           help="Write tested RPC commands into this directory")
+        parser.add_option("--zcashd-compat", dest="zcashd_compat", default=False, action="store_true",
+                          help="Run nodes as paired zebrad + zcashd -zebra-compat stacks")
         self.add_options(parser)
         (self.options, self.args) = parser.parse_args()
+
+        if self.options.zcashd_compat:
+            os.environ["ZCASHD_COMPAT"] = "1"
 
         self.options.tmpdir += '/' + str(self.options.port_seed)
 
@@ -226,6 +241,7 @@ class BitcoinTestFramework(object):
             print("Stopping nodes")
             if self.nodes is not None:
                 stop_nodes(self.nodes)
+                wait_zcashds()
                 wait_bitcoinds()
 
             # self.nodes, self.wallets and self.zainos migth not contain all
