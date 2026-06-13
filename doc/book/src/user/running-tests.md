@@ -5,7 +5,8 @@
 ### Binaries
 
 All tests require the `zebrad` binary; most tests require the `zallet` binary;
-some tests require the `zainod` binary.
+some tests require the `zainod` binary. The opt-in zcashd compatibility profile
+also requires a zebra-compat-enabled `zcashd` binary.
 
 By default, binaries must exist in the `./src/` folder under the repository
 root. Alternatively, you can set the binary paths with environment variables:
@@ -14,6 +15,7 @@ root. Alternatively, you can set the binary paths with environment variables:
 export ZEBRAD=/path/to/zebrad
 export ZAINOD=/path/to/zainod
 export ZALLET=/path/to/zallet
+export ZCASHD=/path/to/zcashd
 ```
 
 ### Python dependencies
@@ -76,6 +78,23 @@ Run all regression tests:
 ./qa/pull-tester/rpc-tests.py
 ```
 
+Run the opt-in zcashd compatibility profile:
+
+```bash
+ZCASHD=/path/to/zcashd ZEBRAD=/path/to/zebrad ./qa/pull-tester/rpc-tests.py --zcashd-compat
+```
+
+This profile starts paired regtest stacks of zebrad plus `zcashd -zebra-compat`.
+Mining and P2P topology operations are routed to zebrad; zcashd provides the
+wallet and zcashd RPC surface. It is intended as a completeness benchmark for
+tests that require zcashd RPCs, not for P2P/mininode or zcashd mining-internals
+tests.
+
+The profile uses a separate pregenerated chain cache. It caches only zebrad
+datadirs; zcashd starts clean, imports the static regtest miner key, and rescans
+cached blocks. Tests that depend on zcashd owning P2P connections, mining blocks
+itself, or exercising chain-control reorg internals remain out of scope.
+
 ## Parallel execution
 
 By default, tests run in parallel with 4 jobs. To change the number of jobs:
@@ -125,6 +144,7 @@ If you get into a bad state, you can recover with:
 ```bash
 rm -rf cache
 killall zebrad
+killall zcashd
 killall zainod
 killall zallet
 ```

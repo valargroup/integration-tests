@@ -289,6 +289,27 @@ NEW_SCRIPTS= [
     'zcashd_key_import_db.py',
 ]
 
+ZCASHD_COMPAT_SCRIPTS = [
+    # end-to-end: block ingestion, wallet credit, tx forwarding into zebra mempool
+    'zcashd_compat_smoke.py',
+    # getzebracompatinfo health/identity: zebra reachability, genesis/tip agreement
+    'zcashd_compat_identity.py',
+    # chain reorg following: zcashd reorgs to a longer zebra-side replacement chain
+    'zcashd_compat_reorg.py',
+    # deposit reorg: a confirmed wallet tx re-confirms after a reorg, no double-count
+    'zcashd_compat_reorg_wallet.py',
+    # chainstate durability: flush-to-tip then recover after an unclean zcashd restart
+    'zcashd_compat_persistence.py',
+    # single-node mutative wallet: sendtoaddress, confirm, listunspent/listtransactions
+    'zcashd_compat_wallet.py',
+    # cross-wallet dumpprivkey -> importprivkey with rescan reconstructs the UTXO set
+    'zcashd_compat_wallet_import.py',
+    # zcashd RPC basic-auth surface (zebra itself uses cookie auth)
+    'multi_rpc.py',
+    # wallet keypool refill plus the encryptwallet/restart path
+    'keypool.py',
+]
+
 ZMQ_SCRIPTS = [
     # ZMQ test can only be run if bitcoin was built with zmq-enabled.
     # call rpc_tests.py with --nozmq to explicitly exclude these tests.
@@ -329,7 +350,7 @@ BASE_SCRIPTS = _without_disabled(BASE_SCRIPTS)
 NEW_SCRIPTS = _without_disabled(NEW_SCRIPTS)
 ZMQ_SCRIPTS = _without_disabled(ZMQ_SCRIPTS)
 
-ALL_SCRIPTS = SERIAL_SCRIPTS + FLAKY_SCRIPTS + BASE_SCRIPTS + NEW_SCRIPTS + ZMQ_SCRIPTS + EXTENDED_SCRIPTS
+ALL_SCRIPTS = SERIAL_SCRIPTS + FLAKY_SCRIPTS + BASE_SCRIPTS + NEW_SCRIPTS + ZCASHD_COMPAT_SCRIPTS + ZMQ_SCRIPTS + EXTENDED_SCRIPTS
 
 def main():
     # Parse arguments and pass through unrecognised args
@@ -350,6 +371,7 @@ def main():
     parser.add_argument('--machines', '-m', type=int, default=-1, help='how many machines to shard the tests over. must also provide individual shard index. Default=-1 (no sharding).')
     parser.add_argument('--rpcgroup', '-r', type=int, default=-1, help='individual shard index. must also provide how many machines to shard the tests over. Default=-1 (no sharding).')
     parser.add_argument('--nozmq', action='store_true', help='do not run the zmq tests')
+    parser.add_argument('--zcashd-compat', action='store_true', help='run the opt-in zcashd compatibility smoke tests')
     args, unknown_args = parser.parse_known_args()
 
     # Create a set to store arguments and create the passon string
@@ -387,6 +409,10 @@ def main():
             raise
 
     # Build list of tests
+    if args.zcashd_compat:
+        passon_args.append("--zcashd-compat")
+        os.environ["ZCASHD_COMPAT"] = "1"
+
     if tests:
         # Individual tests have been specified. Run specified tests that exist
         # in the ALL_SCRIPTS list. Accept the name with or without .py extension.
@@ -396,6 +422,8 @@ def main():
         print("Running individually selected tests: ")
         for t in test_list:
             print("\t" + t)
+    elif args.zcashd_compat:
+        test_list = ZCASHD_COMPAT_SCRIPTS
     elif args.new_only:
         test_list = NEW_SCRIPTS
     else:
@@ -471,6 +499,8 @@ def run_tests(test_handler, test_list, src_dir, build_dir, exeext, jobs=1, enabl
         os.environ["ZAINOD"] = os.path.join(build_dir, "src", "zainod" + exeext)
     if "ZALLET" not in os.environ:
         os.environ["ZALLET"] = os.path.join(build_dir, "src", "zallet" + exeext)
+    if "ZCASHD" not in os.environ:
+        os.environ["ZCASHD"] = os.path.join(build_dir, "src", "zcashd" + exeext)
 
     tests_dir = src_dir + '/qa/rpc-tests/'
 
