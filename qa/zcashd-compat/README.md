@@ -119,21 +119,27 @@ The profile runs the `ZCASHD_COMPAT_SCRIPTS` list in
 | `zcashd_compat_smoke.py` | End-to-end happy path: readiness, block ingestion from zebrad, wallet credit from mined coinbase, `sendtoaddress`, transaction forwarding into zebrad's mempool (`tx_forwarding` drains), confirmation, and tip equality between zcashd and zebrad on both nodes. |
 | `zcashd_compat_identity.py` | The `getzebracompatinfo` health/identity surface: service state, sync state, zebra reachability and identity verification, and network/genesis/best-hash/height agreement with the paired zebrad. |
 | `zcashd_compat_reorg.py` | Reorg following: zebrad-side `invalidateblock` plus a longer replacement chain at depths 3 and 25 (crossing the sync batch size), asserting zcashd reorgs to the new tip and reports the old chain as orphaned with negative confirmations. |
+| `zcashd_compat_wallet.py` | Single-node mutative wallet round-trip: fund from mined coinbase, `sendtoaddress` to a fresh address, forwarding into zebrad's mempool, confirmation, and the wallet read surface (`gettransaction`, `listunspent`, `listtransactions`) plus a `dumpprivkey` round-trip. One node mining its own blocks, so no inter-node propagation. |
+| `zcashd_compat_wallet_import.py` | Cross-wallet key import-with-rescan on a directly-connected two-node stack: node 0 funds an address and exports its key via `dumpprivkey`; node 1 `importprivkey`s it with rescan and must reconstruct the same UTXO set from chain history. The funder mines its own blocks and node 1 receives them by direct delivery, avoiding the relayed-rebroadcast path. |
 
 ### Re-enabled legacy zcashd RPC tests (the benchmark)
 
 These were in `DISABLED_SCRIPTS` because the standard stack cannot run them;
 under this profile they run against the real zcashd wallet/RPC surface. The
-list is deliberately scoped to tests that **pass** against the wrapper and each
-cover a distinct slice of the surface — it is not an attempt to re-enable every
-disabled test (see [below](#not-covered-out-of-scope)).
+list is deliberately scoped to tests that **pass reliably** against the wrapper
+and each cover a distinct slice of the surface — it is not an attempt to
+re-enable every disabled test (see [below](#not-covered-out-of-scope)).
 
 | Area | Tests |
 | --- | --- |
 | RPC interface & auth | `multi_rpc.py` |
-| Node & chain RPCs | `errors.py` |
-| Key management & wallet restore | `key_import_export.py`, `zkey_import_export.py`, `keypool.py`, `threeofthreerestore.py` |
-| Wallet history & balances | `wallet_listreceived.py`, `wallet_isfromme.py` |
+| Keypool & wallet encryption | `keypool.py` |
+
+Both re-enabled legacy tests are single-node. Mutative wallet coverage (key
+import/export, send/receive, rescan) is provided by the profile-native
+`zcashd_compat_wallet.py` and `zcashd_compat_wallet_import.py` above rather than
+by the legacy multi-node wallet tests, which are flaky under zebrad regtest
+(see below).
 
 Partial coverage:
 
@@ -155,6 +161,17 @@ run every disabled test:
   recreated post-Canopy.
 - **`-proxy`/Tor, insight-explorer indexes, and other node options** zebrad
   does not support.
+- **Flaky multi-node legacy tests** (`key_import_export.py`,
+  `zkey_import_export.py`, `threeofthreerestore.py`, `wallet_isfromme.py`,
+  `errors.py`) — these depend on multiple zebrad nodes converging on a tip,
+  which is unreliable in regtest for two related reasons: (1) zebrad does not
+  reliably rebroadcast *received* blocks, so in a 4-node star the leaf miner's
+  blocks never reach the far nodes (ZcashFoundation/zebra#10329, #10332); and
+  (2) tests that load the pregenerated chain cache can start with per-node
+  zebrad datadirs on slightly divergent non-finalized tips, then time out on
+  live P2P reconciliation. The profile-native wallet tests avoid both by using
+  single-node or directly-connected topologies that mine their own blocks from
+  a clean (un-cached) chain.
 - **Failure injection** (zebra endpoint outages, malformed responses, chaos
   soak) — covered by the `zebra_compat_*.py` suite and
   `make compat-test-soak` in valargroup/zcashd, which uses a fake zebra

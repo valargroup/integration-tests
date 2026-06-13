@@ -176,32 +176,38 @@ def sync_blocks(nodes, wallets=None, wait=0.125, timeout=60, allow_different_tip
     If allow_different_tips is True, waits until everyone has
     the same block count.
     """
+    synced = False
     while timeout > 0:
         if allow_different_tips:
             tips = [ x.getblockcount() for x in nodes ]
         else:
             tips = [ x.getbestblockhash() for x in nodes ]
         if tips == [ tips[0] ]*len(tips):
-            if not wallets:
-                if zcashd_compat_enabled():
-                    break
-                return True
+            synced = True
             break
         time.sleep(wait)
         timeout -= wait
 
-    if not wallets and zcashd_compat_enabled():
+    if not synced:
+        print('Node tips:', tips)
+        raise AssertionError("Block sync failed: node tips did not converge")
+
+    if not wallets:
+        if not zcashd_compat_enabled():
+            return True
         # The zcashd wallet processes connected blocks asynchronously, so an
         # in-sync chain tip does not yet guarantee that mined outputs are
         # spendable. `validation_notifications_caught_up` is the zcashd analog
         # of zallet's `wallet_tip == node_tip`: it is true once every connected
-        # block has dispatched its wallet notifications.
-        while timeout > 0:
+        # block has dispatched its wallet notifications. Use a dedicated budget
+        # rather than whatever is left over from tip convergence above.
+        notify_timeout = 60
+        while notify_timeout > 0:
             if all(n.getzebracompatinfo()["local"]["validation_notifications_caught_up"]
                    for n in nodes):
                 return True
             time.sleep(wait)
-            timeout -= wait
+            notify_timeout -= wait
         print('Node tips:', tips)
         raise AssertionError("Block sync failed: zcashd-compat wallet notifications did not catch up")
 
@@ -232,6 +238,7 @@ def sync_mempools(nodes, wallets=None, wait=0.5, timeout=60):
 
     Returns `True` when all wallets are in synced, or if no wallet is given.
     """
+    matched = False
     while timeout > 0:
         pool = set(nodes[0].getrawmempool())
         num_match = 1
@@ -239,11 +246,17 @@ def sync_mempools(nodes, wallets=None, wait=0.5, timeout=60):
             if set(nodes[i].getrawmempool()) == pool:
                 num_match = num_match+1
         if num_match == len(nodes):
-            if not wallets:
-                return True
+            matched = True
             break
         time.sleep(wait)
         timeout -= wait
+
+    if not matched:
+        print('Node mempools:', [ sorted(n.getrawmempool()) for n in nodes ])
+        raise AssertionError("Mempool sync failed: mempools did not converge")
+
+    if not wallets:
+        return True
 
     if wallets:
         # Now that the mempools are in sync, wait for the internal

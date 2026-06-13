@@ -294,16 +294,10 @@ ZCASHD_COMPAT_SCRIPTS = [
     'zcashd_compat_smoke.py',
     'zcashd_compat_identity.py',
     'zcashd_compat_reorg.py',
-    # Re-enabled DISABLED_SCRIPTS that pass against the wrapper and exercise a
-    # distinct slice of the zcashd RPC/wallet surface.
+    'zcashd_compat_wallet.py',
+    'zcashd_compat_wallet_import.py',
     'multi_rpc.py',
     'keypool.py',
-    'errors.py',
-    'key_import_export.py',
-    'zkey_import_export.py',
-    'wallet_listreceived.py',
-    'wallet_isfromme.py',
-    'threeofthreerestore.py',
 ]
 
 ZMQ_SCRIPTS = [
