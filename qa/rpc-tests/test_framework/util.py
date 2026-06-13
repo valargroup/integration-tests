@@ -183,10 +183,27 @@ def sync_blocks(nodes, wallets=None, wait=0.125, timeout=60, allow_different_tip
             tips = [ x.getbestblockhash() for x in nodes ]
         if tips == [ tips[0] ]*len(tips):
             if not wallets:
+                if zcashd_compat_enabled():
+                    break
                 return True
             break
         time.sleep(wait)
         timeout -= wait
+
+    if not wallets and zcashd_compat_enabled():
+        # The zcashd wallet processes connected blocks asynchronously, so an
+        # in-sync chain tip does not yet guarantee that mined outputs are
+        # spendable. `validation_notifications_caught_up` is the zcashd analog
+        # of zallet's `wallet_tip == node_tip`: it is true once every connected
+        # block has dispatched its wallet notifications.
+        while timeout > 0:
+            if all(n.getzebracompatinfo()["local"]["validation_notifications_caught_up"]
+                   for n in nodes):
+                return True
+            time.sleep(wait)
+            timeout -= wait
+        print('Node tips:', tips)
+        raise AssertionError("Block sync failed: zcashd-compat wallet notifications did not catch up")
 
     if wallets:
         # Now that the block counts are in sync, wait for the internal

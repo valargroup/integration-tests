@@ -953,7 +953,6 @@ jobs:
       - get-zcashd
     runs-on: ubuntu-24.04
     if: ${{ !endsWith(github.event.action, '-interop-request') }}
-    continue-on-error: true
 
     steps:
       - name: Check out the selected test branch

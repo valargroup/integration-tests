@@ -25,8 +25,10 @@ from .util import (
     rpc_port,
     rpc_url,
     update_zebrad_conf,
+    wait_or_kill,
     wait_for_zebrad_start,
     zcashd_binary,
+    zcashd_compat_enabled,
     zcashd_processes,
     zcashd_rpc_port,
     zcashd_rpc_url,
@@ -93,6 +95,10 @@ def _reap_existing_process(processes, i):
     if i not in processes:
         return
     process = processes[i]
+    if process.poll() is None:
+        # Still running (e.g. zebrad surviving a zcashd-only shutdown such as
+        # encryptwallet); both zebrad and zcashd exit cleanly on SIGTERM.
+        process.terminate()
     try:
         process.wait(timeout=60)
     except subprocess.TimeoutExpired:
@@ -241,6 +247,12 @@ def wait_for_compat_tip(node, timeout=60):
         )
 
     wait_until(fully_ready, timeout=timeout)
+
+
+def wait_for_node_shutdown(i):
+    processes = zcashd_processes if zcashd_compat_enabled() else bitcoind_processes
+    wait_or_kill(processes[i])
+    del processes[i]
 
 
 def import_miner_key(node, i, rescan):

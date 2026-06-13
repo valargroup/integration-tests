@@ -4,9 +4,10 @@
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal, assert_true, bitcoind_processes, \
+from test_framework.util import assert_equal, assert_true, \
     connect_nodes_bi, start_node, start_nodes, wait_and_assert_operationid_status, \
     get_coinbase_address
+from test_framework.zcashd_compat import wait_for_node_shutdown
 from test_framework.zip317 import conventional_fee, ZIP_317_FEE
 
 from decimal import Decimal
@@ -53,7 +54,7 @@ class WalletNullifiersTest (BitcoinTestFramework):
 
         # encrypt node 1 wallet and wait to terminate
         self.nodes[1].encryptwallet("test")
-        bitcoind_processes[1].wait()
+        wait_for_node_shutdown(1)
 
         # restart node 1
         self.nodes[1] = start_node(1, self.options.tmpdir, [
