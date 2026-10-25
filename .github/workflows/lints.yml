@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install dependencies
-        run: sudo python3 -m pip install yq
+        run: sudo python3 -m pip install yq==4.4.5
 
       - name: Shebang
         run: ./test/lint/lint-shebang.sh
@@ -47,7 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install dependencies
-        run: sudo python3 -m pip install pyflakes
+        run: sudo python3 -m pip install pyflakes==4.0.3
 
       - name: Pyflakes
         run: pyflakes qa
